@@ -521,8 +521,8 @@ class DatabaseAPI():
         return self._racecontext.rhdata.get_ranking_raceClass(raceclass_or_id)
 
     @callWithDatabaseWrapper
-    def raceclass_delete(self, raceclass_or_id):
-        return self._racecontext.rhdata.delete_raceClass(raceclass_or_id)
+    def raceclass_delete(self, raceclass_or_id, force=False):
+        return self._racecontext.rhdata.delete_raceClass(raceclass_or_id, force=force)
 
     @callWithDatabaseWrapper
     def raceclasses_reset(self):

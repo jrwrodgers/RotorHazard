@@ -1310,10 +1310,23 @@ def on_alter_race_class(data):
 @catchLogExcWithDBWrapper
 def on_delete_class(data):
     '''Delete class.'''
-    result = RaceContext.rhdata.delete_raceClass(data['class'])
+    force = bool(data.get('force'))
+    current_heat_id = RaceContext.race.current_heat
+    result = RaceContext.rhdata.delete_raceClass(data['class'], force=force)
     if result:
+        if current_heat_id and not RaceContext.rhdata.get_heat(current_heat_id):
+            RaceContext.race.set_heat(RHUtils.HEAT_ID_NONE)
         RaceContext.rhui.emit_class_data()
         RaceContext.rhui.emit_heat_data()
+        RaceContext.rhui.emit_race_status()
+    elif RaceContext.rhdata.savedRaceMetas_has_raceClass(data['class']) and not force:
+        RaceContext.rhui.emit_priority_message(
+            __('Class deletion prevented: unlock the class first, then delete'),
+            False)
+    else:
+        RaceContext.rhui.emit_priority_message(
+            __('Class deletion prevented by active race: Stop and save/discard laps'),
+            False)
 
 @SOCKET_IO.on('add_pilot')
 @catchLogExcWithDBWrapper
