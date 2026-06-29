@@ -43,6 +43,7 @@
 
 	var heat_to_unlock = null;
 	var class_to_unlock = null;
+	var class_to_delete = null;
 	var current_format = null;
 
 	$(document).ready(function () {
@@ -566,6 +567,8 @@
 							.data('id', race_class.id)
 							.addClass('btn-danger')
 							.addClass('delete_class')
+							.addClass('open-mfp-popup')
+							.attr('data-mfp-src', '#class_delete_confirm')
 							.html('&#215;')
 							.appendTo(field);
 						el.append(field);
@@ -793,13 +796,8 @@
 					} else {
 						$(`#unlock--race-class-${race_class.id}`)
 							.prop('hidden', true);
-						if (race_class.manual_unlock) {
-							$(`#delete--race-class-${race_class.id}`)
-								.prop('hidden', true);
-						} else {
-							$(`#delete--race-class-${race_class.id}`)
-								.prop('hidden', false);
-						}
+						$(`#delete--race-class-${race_class.id}`)
+							.prop('hidden', false);
 					}
 
 					// Description
@@ -1303,12 +1301,17 @@
 		});
 
 		$(document).on("click", '.delete_class', function (event) {
-			var class_id = parseInt($(this).data('id'));
+			class_to_delete = parseInt($(this).data('id'));
+		});
+
+		$(document).on("click", '#delete_class', function (event) {
+			$.magnificPopup.close();
+			var race_class = rotorhazard.event.classes.find(obj => {return obj.id == class_to_delete});
 			var data = {
-				class: class_id,
+				class: class_to_delete,
+				force: race_class && (race_class.locked || race_class.manual_unlock),
 			};
 			socket.emit('delete_class', data);
-			$('#race-class-'+ class_id).remove();
 		});
 
 		$(document).on("click", '.duplicate_class', function (event) {
@@ -3820,6 +3823,15 @@
 			<div class="popup-content">
 				<p>{{ __('Modifying a locked class retroactively changes saved race data.') }}</p>
 				<p><button class="btn-danger" id="unlock_class">{{ __('Unlock') }}</button>
+				<button class="cancel">{{ __('Cancel') }}</button></p>
+			</div>
+		</div>
+
+		<div id="class_delete_confirm" class="priority-message-interrupt mfp-hide popup">
+			<h2>{{ __('Alert') }}</h2>
+			<div class="popup-content">
+				<p>{{ __('Deleting a class removes the class, its heats, and all saved race data for that class. This cannot be undone.') }}</p>
+				<p><button class="btn-danger" id="delete_class">{{ __('Delete') }}</button>
 				<button class="cancel">{{ __('Cancel') }}</button></p>
 			</div>
 		</div>

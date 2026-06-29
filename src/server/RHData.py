@@ -2125,34 +2125,122 @@ class RHData():
 
         return race_class, race_list
 
-    def delete_raceClass(self, raceClass_or_id):
-        race_class = self.resolve_raceClass_from_raceClass_or_id(raceClass_or_id)
+    def _delete_savedRaceMeta_cascade(self, race_meta):
+        race_id = race_meta.id
+        for lap in Database.SavedRaceLap.query.filter_by(race_id=race_id).all():
+            Database.LapSplit.query.filter_by(
+                node_index=lap.node_index,
+                lap_id=lap.id
+            ).delete(synchronize_session=False)
+        Database.SavedRaceLap.query.filter_by(race_id=race_id).delete(synchronize_session=False)
+        Database.SavedPilotRace.query.filter_by(race_id=race_id).delete(synchronize_session=False)
+        Database.SavedRaceMetaAttribute.query.filter_by(id=race_id).delete(synchronize_session=False)
+        Database.DB_session.delete(race_meta)
 
-        has_race = self.savedRaceMetas_has_raceClass(race_class.id)
+    def _collect_saved_race_ids_for_class(self, class_id):
+        race_ids = set()
+        for race_meta in Database.SavedRaceMeta.query.filter_by(class_id=class_id).all():
+            race_ids.add(race_meta.id)
+        for heat in Database.Heat.query.filter_by(class_id=class_id).all():
+            for race_meta in Database.SavedRaceMeta.query.filter_by(heat_id=heat.id).all():
+                race_ids.add(race_meta.id)
+        return race_ids
 
-        if has_race:
-            logger.info('Refusing to delete class {0}: is in use'.format(race_class.id))
+    def _detach_race_class_foreign_keys(self, class_id):
+        Database.SavedRaceMeta.query.filter_by(class_id=class_id).update(
+            {Database.SavedRaceMeta.class_id: RHUtils.CLASS_ID_NONE},
+            synchronize_session=False)
+        Database.Heat.query.filter_by(class_id=class_id).update(
+            {Database.Heat.class_id: RHUtils.CLASS_ID_NONE},
+            synchronize_session=False)
+
+    def _purge_heat(self, heat_or_id):
+        heat = self.resolve_heat_from_heat_or_id(heat_or_id)
+        if not heat:
             return False
-        else:
-            deleted_race_class = race_class.id
 
-            for attr in self.get_raceclass_attributes(raceClass_or_id):
-                Database.DB_session.delete(attr)
+        heat_id = heat.id
+        for race_meta in list(self.get_savedRaceMetas_by_heat(heat_id)):
+            self._delete_savedRaceMeta_cascade(race_meta)
+        for attr in self.get_heat_attributes(heat_or_id):
+            Database.DB_session.delete(attr)
+        for heatnode in Database.HeatNode.query.filter_by(heat_id=heat_id).order_by(Database.HeatNode.node_index).all():
+            Database.DB_session.delete(heatnode)
+        Database.DB_session.delete(heat)
+        Database.DB_session.flush()
+        return True
 
-            Database.DB_session.delete(race_class)
-            for heat in Database.Heat.query.all():
-                if heat.class_id == race_class.id:
-                    heat.class_id = RHUtils.CLASS_ID_NONE
+    def delete_raceClass(self, raceClass_or_id, force=False):
+        race_class = self.resolve_raceClass_from_raceClass_or_id(raceClass_or_id)
+        if not race_class:
+            return False
 
-            self.commit()
+        deleted_race_class = race_class.id
 
-            self._Events.trigger(Evt.CLASS_DELETE, {
-                'class_id': deleted_race_class,
-                })
+        if self._racecontext.race.race_status != RaceStatus.READY:
+            current_heat = self.get_heat(self._racecontext.race.current_heat)
+            if current_heat and current_heat.class_id == deleted_race_class:
+                logger.info('Refusing to delete class {0}: race in progress'.format(deleted_race_class))
+                return False
 
-            logger.info('Class {0} deleted'.format(deleted_race_class))
+        has_race = self.savedRaceMetas_has_raceClass(deleted_race_class)
+        if has_race and not force:
+            logger.info('Refusing to delete class {0}: is in use'.format(deleted_race_class))
+            return False
 
-            return True
+        deleted_heat_ids = [heat.id for heat in Database.Heat.query.filter_by(class_id=deleted_race_class).all()]
+        had_saved_races = bool(self._collect_saved_race_ids_for_class(deleted_race_class))
+
+        for heat_id in deleted_heat_ids:
+            if self._racecontext.race.current_heat == heat_id and \
+                    self._racecontext.race.race_status != RaceStatus.READY:
+                logger.info('Refusing to delete class {0}: heat {1} in use'.format(deleted_race_class, heat_id))
+                return False
+
+        try:
+            for race_id in self._collect_saved_race_ids_for_class(deleted_race_class):
+                race_meta = Database.SavedRaceMeta.query.get(race_id)
+                if race_meta:
+                    self._delete_savedRaceMeta_cascade(race_meta)
+            Database.DB_session.flush()
+
+            for heat_id in list(deleted_heat_ids):
+                self._purge_heat(heat_id)
+
+            for slot in Database.HeatNode.query.filter(
+                    Database.HeatNode.method == ProgramMethod.CLASS_RESULT,
+                    Database.HeatNode.seed_id == deleted_race_class).all():
+                slot.method = ProgramMethod.NONE
+                slot.seed_rank = None
+                slot.seed_id = None
+
+            self._detach_race_class_foreign_keys(deleted_race_class)
+            Database.DB_session.flush()
+
+            Database.RaceClassAttribute.query.filter_by(id=deleted_race_class).delete(synchronize_session=False)
+            Database.RaceClass.query.filter_by(id=deleted_race_class).delete(synchronize_session=False)
+            Database.DB_session.flush()
+        except Exception as ex:
+            logger.error('Error deleting class {0}: {1}'.format(deleted_race_class, ex))
+            self.rollback()
+            return False
+
+        if not self.commit():
+            self.rollback()
+            return False
+
+        if had_saved_races:
+            self.clear_results_event()
+            self._racecontext.pagecache.set_valid(False)
+
+        self._Events.trigger(Evt.CLASS_DELETE, {
+            'class_id': deleted_race_class,
+            'heat_ids': deleted_heat_ids,
+            })
+
+        logger.info('Class {0} deleted'.format(deleted_race_class))
+
+        return True
 
     def get_results_raceClass(self, raceClass_or_id):
         race_class = self.resolve_raceClass_from_raceClass_or_id(raceClass_or_id)
