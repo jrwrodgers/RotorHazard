@@ -64,6 +64,7 @@ import functools
 import signal
 import werkzeug
 import urllib3
+from urllib.parse import urlparse, urlunparse
 
 from flask import Flask, send_from_directory, request, make_response, Response, templating, redirect, abort, copy_current_request_context
 from flask.blueprints import Blueprint
@@ -704,6 +705,61 @@ def render_viewImg(img_filename):
     if os.path.isfile(img_path):
         return send_from_directory(img_folder_path, img_filename)
     abort(404)
+
+KOKORO_DEFAULT_VOICE = 'af_sarah'
+
+def _get_speech_service_base_url(address):
+    '''Base URL (scheme + host + port) for Kokoro voice service.'''
+    if not address:
+        return ''
+    if not address.startswith('http://') and not address.startswith('https://'):
+        address = 'http://' + address
+    parsed = urlparse(address.strip().rstrip('/'))
+    return urlunparse((parsed.scheme, parsed.netloc, '', '', '', '')).rstrip('/')
+
+def _build_speech_service_callout_url(address):
+    '''Build Kokoro callout URL; uses address path if present, else /callout.'''
+    if not address:
+        return ''
+    if not address.startswith('http://') and not address.startswith('https://'):
+        address = 'http://' + address
+    parsed = urlparse(address.strip())
+    if parsed.path and parsed.path != '/':
+        return address.strip().rstrip('/')
+    base = urlunparse((parsed.scheme, parsed.netloc, '', '', '', '')).rstrip('/')
+    return base + '/callout'
+
+def _fetch_speech_service_voices(data):
+    '''GET /voices from Kokoro voice service; returns requests Response.'''
+    if not data:
+        raise ValueError('Bad request')
+    address = (data.get('address') or '').strip()
+    if not address:
+        raise ValueError('Missing address')
+    voices_url = _get_speech_service_base_url(address) + '/voices'
+    return requests.get(voices_url, timeout=5.0)
+
+def _forward_speech_service_request(data):
+    '''POST speech callout to Kokoro voice service; returns requests Response.'''
+    if not data:
+        raise ValueError('Bad request')
+    address = (data.get('address') or '').strip()
+    text = data.get('text')
+    if not address or not text:
+        raise ValueError('Missing address or text')
+    address = _build_speech_service_callout_url(address)
+    try:
+        speed = float(data.get('speed', 1.0))
+    except (TypeError, ValueError):
+        speed = 1.0
+    speed = max(0.5, min(2.0, speed))
+    payload = {
+        'text': text,
+        'voice': data.get('voice') or KOKORO_DEFAULT_VOICE,
+        'speed': speed,
+        'block': data.get('block') or 'none'
+    }
+    return requests.post(address, json=payload, timeout=5.0)
 
 # Redirect routes (Previous versions/Delta 5)
 @APP.route('/race')
@@ -2669,6 +2725,31 @@ def save_callouts(data):
 @catchLogExcWithDBWrapper
 def reload_callouts(*args):
     RaceContext.rhui.emit_callouts()
+
+@SOCKET_IO.on('get_speech_service_voices')
+@catchLogExceptionsWrapper
+def on_get_speech_service_voices(data):
+    '''Fetch available voices from Kokoro voice service.'''
+    try:
+        resp = _fetch_speech_service_voices(data)
+        resp.raise_for_status()
+        return resp.json()
+    except requests.RequestException as ex:
+        logger.warning('Speech service voices error: {}'.format(ex))
+        return {'voices': [], 'error': str(ex)}
+    except ValueError as ex:
+        return {'voices': [], 'error': str(ex)}
+
+@SOCKET_IO.on('speak_service')
+@catchLogExceptionsWrapper
+def on_speak_service(data):
+    '''Forward speech callout to external speech service (socket.io transport).'''
+    try:
+        _forward_speech_service_request(data)
+    except ValueError:
+        pass
+    except requests.RequestException as ex:
+        logger.warning('Speech service proxy error: {}'.format(ex))
 
 @SOCKET_IO.on('play_callout_text')
 @catchLogExcWithDBWrapper

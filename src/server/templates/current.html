@@ -253,7 +253,7 @@
 
 		socket.on('heartbeat', function (msg) {
 			if (speakObjsQueue.length > 0) {
-				var isSpeakingFlag = $().articulate('isSpeaking');
+				var isSpeakingFlag = isSpeakQueueBlocking();
 				if (checkSpeakQueueFlag) {
 					if (!isSpeakingFlag) {
 						var obj = speakObjsQueue.shift();
@@ -848,6 +848,31 @@
 
 		<ol class="form">
 			<li>
+				<div class="label-block">
+					<label for="set_voice_output_mode">{{ __('Speech Output') }}</label>
+				</div>
+				<select id="set_voice_output_mode">
+					<option value="browser">{{ __('Browser (Web Speech)') }}</option>
+					<option value="speech_service">{{ __('Speech Service (Kokoro)') }}</option>
+				</select>
+			</li>
+			<li class="voice-speech-service-only">
+				<div class="label-block">
+					<label for="set_speech_service_address">{{ __('Kokoro Address') }}</label>
+					<p class="desc" id="speech_service_address_desc">{{ __('Network address of the PC running Kokoro, as reachable from the RotorHazard server (e.g. 192.168.1.50:8765). Audio plays on that machine.') }}</p>
+				</div>
+				<input type="text" id="set_speech_service_address" placeholder="192.168.1.50:8765">
+			</li>
+			<li class="voice-speech-service-only">
+				<div class="label-block">
+					<label for="set_speech_service_voice">{{ __('Kokoro Voice') }}</label>
+				</div>
+				<select id="set_speech_service_voice">
+					<option value="">{{ __('Loading...') }}</option>
+				</select>
+				<button type="button" class="button" id="refresh_speech_service_voices" title="{{ __('Refresh voice list') }}">&#8635; <span class="screen-reader-text">{{ __('Refresh') }}</span></button>
+			</li>
+			<li class="voice-browser-only">
 				<div class="label-block" id="voice_select">
 					<label for="set_voice_language">{{ __('Voice Select') }}</label>
 				</div>
@@ -999,7 +1024,7 @@
 				</div>
 				<input type="range" id="set_voice_rate" min="0" max="2.0" step="0.01">
 			</li>
-			<li>
+			<li class="voice-browser-only">
 				<div class="label-block">
 					<label for="set_voice_pitch">{{ __('Voice Pitch') }}</label>
 					<p class="desc">{{ __('Pitch') }}: <span id="voice_pitch_value"></span></p>

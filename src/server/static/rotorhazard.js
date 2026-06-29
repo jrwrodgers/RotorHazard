@@ -15,6 +15,17 @@ const MAX_LOG_VOLUME = 1.0;
 const LEADER_FLAG_CHAR = 'L';
 const WINNER_FLAG_CHAR = 'W';
 
+const VOICE_OUTPUT_BROWSER = 'browser';
+const VOICE_OUTPUT_SPEECH_SERVICE = 'speech_service';
+const KOKORO_DEFAULT_VOICE = 'af_sarah';
+
+function normalizeVoiceOutputMode(mode) {
+	if (mode === 'speech_service_direct') {
+		return VOICE_OUTPUT_SPEECH_SERVICE;
+	}
+	return mode;
+}
+
 // Display sync warning above (ms)
 const SYNC_WARNING_THRESHOLD_1 = 2;
 const SYNC_WARNING_THRESHOLD_3 = 10;
@@ -561,20 +572,72 @@ function playWinnerTone() {
 	}
 };
 
+function isSpeechServiceMode() {
+	return normalizeVoiceOutputMode(rotorhazard.voice_output_mode) === VOICE_OUTPUT_SPEECH_SERVICE;
+}
+
+function buildSpeechServicePayload(text) {
+	var speed = parseFloat(rotorhazard.voice_rate);
+	if (isNaN(speed)) {
+		speed = 1.0;
+	}
+	speed = Math.max(0.5, Math.min(2.0, speed));
+	return {
+		text: text,
+		voice: rotorhazard.speech_service_voice || KOKORO_DEFAULT_VOICE,
+		speed: speed,
+		block: 'none'
+	};
+}
+
+function isSpeakQueueBlocking() {
+	return !isSpeechServiceMode() && $().articulate('isSpeaking');
+}
+
+function extractSpeakText(obj) {
+	if (typeof obj !== 'string') {
+		return '';
+	}
+	var text = obj;
+	if (text.indexOf('<') >= 0) {
+		var el = document.createElement('div');
+		el.innerHTML = text;
+		text = el.textContent || el.innerText || '';
+	}
+	return text.trim();
+}
+
+function speakViaService(text) {
+	var address = (rotorhazard.speech_service_address || '').trim();
+	if (!text || !address) {
+		return false;
+	}
+	if (typeof socket !== 'undefined' && socket) {
+		socket.emit('speak_service', Object.assign({address: address}, buildSpeechServicePayload(text)));
+		return true;
+	}
+	return false;
+}
+
 function doSpeak(obj) {
+	var speakObj = obj;
 	if (obj.startsWith(LEADER_FLAG_CHAR)) {
-		obj = obj.substring(1);
+		speakObj = obj.substring(1);
 		playLeaderTone();
 	}
 	else if (obj.startsWith(WINNER_FLAG_CHAR)) {
-		obj = obj.substring(1);
+		speakObj = obj.substring(1);
 		playWinnerTone();
 	}
-	if (rotorhazard.voice_volume && rotorhazard.voice_volume > MIN_LOG_VOL_LIM) {
-		if (obj.length > 0) {
-			$(obj).articulate('setVoice','name', rotorhazard.voice_language).articulate('speak');
-			return true;
-		}
+	if (!rotorhazard.voice_volume || rotorhazard.voice_volume <= MIN_LOG_VOL_LIM) {
+		return false;
+	}
+	if (isSpeechServiceMode()) {
+		return speakViaService(extractSpeakText(speakObj));
+	}
+	if (speakObj.length > 0) {
+		$(speakObj).articulate('setVoice','name', rotorhazard.voice_language).articulate('speak');
+		return true;
 	}
 	return false;
 };
@@ -582,6 +645,12 @@ function doSpeak(obj) {
 function speak(obj, priority) {
 	if (typeof(priority)=='undefined')
 		priority = false;
+
+	// Kokoro queues callouts server-side; skip browser speak queue.
+	if (isSpeechServiceMode()) {
+		doSpeak(obj);
+		return;
+	}
 
 	if (priority) {
 		speakObjsQueue.unshift(obj);
@@ -1071,6 +1140,9 @@ var rotorhazard = {
 	language_strings: {},
 	interface_language: '',
 	// text-to-speech callout options
+	voice_output_mode: VOICE_OUTPUT_BROWSER, // browser or Kokoro speech service
+	speech_service_address: '', // host:port for speech service, e.g. 127.0.0.1:8765
+	speech_service_voice: KOKORO_DEFAULT_VOICE, // voice id for speech service
 	voice_string_language: 'match-timer', // text source language
 	voice_language: '', // speech synthesis engine (browser-supplied)
 	voice_volume: 1.0, // voice call volume
@@ -1152,7 +1224,83 @@ var rotorhazard = {
 			return (this.deferred.running || this.race.running);
 		}
 	},
+	updateSpeechOutputUI: function() {
+		var speechMode = isSpeechServiceMode();
+		$('.voice-browser-only').toggle(!speechMode);
+		$('.voice-speech-service-only').toggle(speechMode);
+	},
+	populateSpeechOutputSettings: function() {
+		if ($('#set_voice_output_mode').length) {
+			var mode = normalizeVoiceOutputMode(rotorhazard.voice_output_mode || VOICE_OUTPUT_BROWSER);
+			if (mode !== rotorhazard.voice_output_mode) {
+				rotorhazard.voice_output_mode = mode;
+				rotorhazard.saveData();
+			}
+			$('#set_voice_output_mode').val(mode);
+		}
+		if ($('#set_speech_service_address').length) {
+			$('#set_speech_service_address').val(rotorhazard.speech_service_address || '');
+		}
+		if ($('#set_speech_service_voice').length) {
+			$('#set_speech_service_voice').val(rotorhazard.speech_service_voice || KOKORO_DEFAULT_VOICE);
+		}
+		this.updateSpeechOutputUI();
+		if (isSpeechServiceMode()) {
+			this.loadSpeechServiceVoices();
+		}
+	},
+	loadSpeechServiceVoices: function(callback) {
+		var address = (rotorhazard.speech_service_address || '').trim();
+		var select = $('#set_speech_service_voice');
+		if (!address || !select.length) {
+			if (callback) {
+				callback(false);
+			}
+			return;
+		}
+		if (typeof socket === 'undefined' || !socket) {
+			if (callback) {
+				callback(false);
+			}
+			return;
+		}
+		select.empty();
+		select.append($('<option>').val('').text(__('Loading...')));
+		socket.emit('get_speech_service_voices', {address: address}, function(data) {
+			var voices = (data && data.voices) ? data.voices : [];
+			var curVal = rotorhazard.speech_service_voice || KOKORO_DEFAULT_VOICE;
+			select.empty();
+			if (!voices.length) {
+				select.append($('<option>').val(curVal).text(curVal));
+				select.val(curVal);
+				if (callback) {
+					callback(false);
+				}
+				return;
+			}
+			for (var i = 0; i < voices.length; i++) {
+				var voice = voices[i];
+				var label = voice.name;
+				if (voice.lang) {
+					label += ' (' + voice.lang + ')';
+				}
+				select.append($('<option>').val(voice.name).text(label));
+			}
+			select.val(curVal);
+			if (!select.val()) {
+				select.val(voices[0].name);
+				rotorhazard.speech_service_voice = select.val();
+				rotorhazard.saveData();
+			}
+			if (callback) {
+				callback(true);
+			}
+		});
+	},
 	rhStorageItems : [
+		{ name: 'rotorhazard.voice_output_mode', getVal: function() {return rotorhazard.voice_output_mode;}, setVal: function(val) {rotorhazard.voice_output_mode = normalizeVoiceOutputMode(parseJsonStr(val));}, isAudio: true },
+		{ name: 'rotorhazard.speech_service_address', getVal: function() {return rotorhazard.speech_service_address;}, setVal: function(val) {rotorhazard.speech_service_address = parseJsonStr(val);}, isAudio: true },
+		{ name: 'rotorhazard.speech_service_voice', getVal: function() {return rotorhazard.speech_service_voice;}, setVal: function(val) {rotorhazard.speech_service_voice = parseJsonStr(val);}, isAudio: true },
 		{ name: 'rotorhazard.voice_string_language', getVal: function() {return rotorhazard.voice_string_language;}, setVal: function(val) {rotorhazard.voice_string_language = parseJsonStr(val);}, isAudio: true },
 		{ name: 'rotorhazard.voice_language', getVal: function() {return rotorhazard.voice_language;}, setVal: function(val) {rotorhazard.voice_language = parseJsonStr(val);}, isAudio: true },
 		{ name: 'rotorhazard.voice_volume', getVal: function() {return rotorhazard.voice_volume;}, setVal: function(val) {rotorhazard.voice_volume = parseJsonStr(val);}, isAudio: true },
@@ -1538,6 +1686,35 @@ function get_default_articulate_voice() {
 	return null;
 }
 
+function initSpeechOutputSettings() {
+	if (!$('#set_voice_output_mode').length) {
+		return;
+	}
+	rotorhazard.populateSpeechOutputSettings();
+	$('#set_voice_output_mode').off('change.speechOutput').on('change.speechOutput', function() {
+		rotorhazard.voice_output_mode = $(this).val();
+		rotorhazard.saveData();
+		rotorhazard.updateSpeechOutputUI();
+		if (isSpeechServiceMode()) {
+			rotorhazard.loadSpeechServiceVoices();
+		}
+	});
+	$('#set_speech_service_address').off('change.speechOutput').on('change.speechOutput', function() {
+		rotorhazard.speech_service_address = $(this).val().trim();
+		rotorhazard.saveData();
+		if (isSpeechServiceMode()) {
+			rotorhazard.loadSpeechServiceVoices();
+		}
+	});
+	$('#set_speech_service_voice').off('change.speechOutput').on('change.speechOutput', function() {
+		rotorhazard.speech_service_voice = $(this).val();
+		rotorhazard.saveData();
+	});
+	$('#refresh_speech_service_voices').off('click.speechOutput').on('click.speechOutput', function() {
+		rotorhazard.loadSpeechServiceVoices();
+	});
+}
+
 // restore local settings
 rotorhazard.voice_language = get_default_articulate_voice();  // set initial default voice
 rotorhazard.restoreData();
@@ -1545,6 +1722,8 @@ rotorhazard.restoreData();
 
 if (typeof jQuery != 'undefined') {
 jQuery(document).ready(function($){
+	initSpeechOutputSettings();
+
 	// display admin options
 	if (rotorhazard.admin) {
 		$('*').removeClass('admin-hide');
@@ -1661,6 +1840,12 @@ jQuery(document).ready(function($){
 
 	// startup socket connection
 	socket = io.connect(location.protocol + '//' + document.domain + ':' + location.port);
+
+	socket.on('connect', function() {
+		if (isSpeechServiceMode() && $('#set_speech_service_voice').length) {
+			rotorhazard.loadSpeechServiceVoices();
+		}
+	});
 
 	// reconnect when visibility is regained
 	$(document).on('visibilitychange', function(){
